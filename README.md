@@ -8,8 +8,37 @@ Processing sketches.
 | [`flowfield/`](flowfield/) | A live Perlin-noise flow field in C. Drawn with Braille characters in the terminal Omarchy already uses for its screensaver. About 2% of one CPU core at 1080p. |
 | [`braille-art/`](braille-art/) | A Python generator that draws a flow field or a fractal tree as Braille art into the Omarchy screensaver file, with fresh random parameters at every boot and every hour, animated by Omarchy's own ttfx effects. |
 
-Each directory has its own README and `install.sh`. Both install only under
-`~/.local` and `~/.config`, so Omarchy updates never touch them, and both
+## Install
+
+Omarchy ships with everything these need (a C compiler and Python). Clone the
+repo, then run the installer for the one you want:
+
+```
+git clone https://github.com/murphybradyluke/Live-Flow-Field-Screensaver
+cd Live-Flow-Field-Screensaver
+```
+
+The live flow field (the main one):
+
+```
+cd flowfield
+bash install.sh
+```
+
+Then log out and back in once. After that the idle screensaver and
+System > Screensaver (Super+Esc) run the flow field. To watch it right away in
+any terminal, run `~/.local/bin/omarchy-flowfield`; any key exits.
+
+The Braille art generator (a fresh still picture at every boot and every hour,
+animated by Omarchy's own text effects):
+
+```
+cd braille-art
+bash install.sh
+```
+
+Each directory has its own README with settings and details. Both install only
+under `~/.local` and `~/.config`, so Omarchy updates never touch them, and both
 uninstall with `bash install.sh --uninstall`.
 
 ## The sketches
