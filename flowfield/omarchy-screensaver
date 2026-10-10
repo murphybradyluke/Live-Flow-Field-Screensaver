@@ -1,0 +1,57 @@
+#!/bin/bash
+# Drop-in replacement for Omarchy's screensaver runner.
+#
+# Omarchy's launcher opens a fullscreen terminal per monitor and runs the
+# command "omarchy-screensaver" inside it. This copy of that command lives in
+# ~/.local/lib/omarchy-flowfield, which ~/.config/uwsm/env.d/flowfield puts
+# ahead of /usr/bin, so the launcher finds this one first. It does exactly
+# what the stock script does (black background, hidden cursor, exit on key,
+# focus loss or signal) but runs the live flow field instead of ttfx.
+#
+# If the flow field binary is missing, the stock screensaver runs instead.
+
+flow="$HOME/.local/bin/omarchy-flowfield"
+[[ -x $flow ]] || exec /usr/bin/omarchy-screensaver "$@"
+
+screensaver_in_focus() {
+  hyprctl activewindow -j | jq -e '.class == "org.omarchy.screensaver"' >/dev/null 2>&1
+}
+
+exit_screensaver() {
+  hyprctl eval 'hl.config({ cursor = { invisible = false } })' &>/dev/null || hyprctl keyword cursor:invisible false &>/dev/null || true
+  [[ -n $pid ]] && kill "$pid" 2>/dev/null
+  pkill -f '[o]rg.omarchy.screensaver' 2>/dev/null
+  exit 0
+}
+
+trap exit_screensaver SIGINT SIGTERM SIGHUP SIGQUIT
+
+printf '\033]11;rgb:00/00/00\007'  # black background
+hyprctl eval 'hl.config({ cursor = { invisible = true } })' &>/dev/null || hyprctl keyword cursor:invisible true &>/dev/null
+
+# The terminal starts at 80x24 and grows once the compositor sizes the window.
+wait_for_terminal_resize() {
+  local deadline=$((SECONDS + 2))
+  while ((SECONDS < deadline)) && [[ $(stty size 2>/dev/null) == "24 80" ]]; do
+    sleep 0.02
+  done
+}
+wait_for_terminal_resize
+
+# Extra options for the flow field can go in ~/.config/omarchy-flowfield.conf,
+# one line, e.g.:  --fps 15 --density 12
+opts=()
+[[ -r $HOME/.config/omarchy-flowfield.conf ]] && read -r -a opts <"$HOME/.config/omarchy-flowfield.conf"
+
+"$flow" "${opts[@]}" &
+pid=$!
+
+# The flow field exits by itself on any key or mouse movement. This loop adds
+# the stock behaviour of also quitting when the window loses focus.
+while kill -0 "$pid" 2>/dev/null; do
+  if ! screensaver_in_focus; then
+    exit_screensaver
+  fi
+  sleep 1
+done
+exit_screensaver

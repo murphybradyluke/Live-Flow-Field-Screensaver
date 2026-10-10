@@ -1,0 +1,4 @@
+# Installed by omarchy-flowfield as ~/.config/uwsm/env.d/flowfield.
+# Puts the flow field's copy of omarchy-screensaver ahead of the stock one for
+# the whole Hyprland session. Takes effect at the next login.
+export PATH="$HOME/.local/lib/omarchy-flowfield:$PATH"

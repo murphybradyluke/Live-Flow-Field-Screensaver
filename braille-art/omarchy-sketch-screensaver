@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Draw a generative sketch as Braille art for the Omarchy screensaver.
+
+Omarchy's screensaver animates whatever text sits in
+~/.config/omarchy/branding/screensaver.txt. This script draws a Perlin-noise
+flow field or a fractal tree the same way the Processing sketches do, but
+onto a grid of Braille dots instead of pixels, and writes the result there.
+Every run picks fresh random parameters, so each picture is different.
+
+Usage:
+  omarchy-sketch-screensaver [field|tree|random] [options]
+
+Options:
+  --width N     columns of art (default 120)
+  --height N    rows of art (default 36)
+  --seed N      reproduce a specific picture
+  --out PATH    write somewhere else (default: the Omarchy screensaver file)
+  --preview     print to the terminal instead of writing a file
+  --show        start the screensaver right away to look at the result
+
+Only the Python standard library is used, so it runs on a stock Omarchy install.
+"""
+
+import argparse
+import math
+import os
+import random
+import shutil
+import subprocess
+import sys
+
+DEFAULT_OUT = os.path.expanduser("~/.config/omarchy/branding/screensaver.txt")
+
+
+# ----------------------------------------------------------------------------
+# Perlin noise, the same idea as Processing's noise(): smooth randomness that
+# changes gently as you move across it.
+# ----------------------------------------------------------------------------
+class Perlin:
+    def __init__(self, rng):
+        perm = list(range(256))
+        rng.shuffle(perm)
+        self.p = perm + perm
+
+    @staticmethod
+    def _fade(t):
+        return t * t * t * (t * (t * 6 - 15) + 10)
+
+    @staticmethod
+    def _grad(h, x, y):
+        h &= 7
+        u, v = (x, y) if h < 4 else (y, x)
+        return (u if h & 1 == 0 else -u) + (v if h & 2 == 0 else -v)
+
+    def noise(self, x, y):
+        xi, yi = math.floor(x), math.floor(y)
+        xf, yf = x - xi, y - yi
+        xi &= 255
+        yi &= 255
+        u, v = self._fade(xf), self._fade(yf)
+        p = self.p
+        a, b = p[xi] + yi, p[xi + 1] + yi
+        n = _lerp(
+            v,
+            _lerp(u, self._grad(p[a], xf, yf), self._grad(p[b], xf - 1, yf)),
+            _lerp(u, self._grad(p[a + 1], xf, yf - 1), self._grad(p[b + 1], xf - 1, yf - 1)),
+        )
+        # Gradient noise lands in roughly [-1, 1]; fold it into [0, 1].
+        return min(1.0, max(0.0, n * 0.5 + 0.5))
+
+
+def _lerp(t, a, b):
+    return a + t * (b - a)
+
+
+# ----------------------------------------------------------------------------
+# A canvas made of Braille dots. One terminal cell holds a 2 x 4 grid of dots,
+# so a 120 x 36 character picture is really 240 x 144 "pixels".
+# ----------------------------------------------------------------------------
+class DotCanvas:
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.w, self.h = cols * 2, rows * 4
+        self.dots = bytearray(self.w * self.h)
+
+    def plot(self, x, y):
+        xi, yi = int(x), int(y)
+        if 0 <= xi < self.w and 0 <= yi < self.h:
+            self.dots[yi * self.w + xi] = 1
+
+    def disc(self, x, y, r):
+        if r <= 0.5:
+            self.plot(x, y)
+            return
+        ri = int(math.ceil(r))
+        for dy in range(-ri, ri + 1):
+            for dx in range(-ri, ri + 1):
+                if dx * dx + dy * dy <= r * r:
+                    self.plot(x + dx, y + dy)
+
+    def line(self, x0, y0, x1, y1, thickness=1.0):
+        steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+        for i in range(steps + 1):
+            t = i / steps
+            self.disc(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, thickness / 2)
+
+    def inside(self, x, y):
+        return 0 <= x < self.w and 0 <= y < self.h
+
+    def fill_ratio(self):
+        return sum(self.dots) / len(self.dots)
+
+    # Braille bit layout (col, row): (0,0)=1 (0,1)=2 (0,2)=4 (1,0)=8
+    # (1,1)=16 (1,2)=32 (0,3)=64 (1,3)=128
+    _BITS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
+
+    def render(self):
+        lines = []
+        for cy in range(self.rows):
+            chars = []
+            for cx in range(self.cols):
+                bits = 0
+                for dy in range(4):
+                    row = (cy * 4 + dy) * self.w + cx * 2
+                    if self.dots[row]:
+                        bits |= self._BITS[dy][0]
+                    if self.dots[row + 1]:
+                        bits |= self._BITS[dy][1]
+                chars.append(chr(0x2800 + bits) if bits else " ")
+            lines.append("".join(chars).rstrip())
+        # Trim blank rows top and bottom, and the common blank margin on the left,
+        # so the screensaver can centre what is actually drawn.
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            margin = min(len(l) - len(l.lstrip(" ")) for l in lines if l.strip())
+            lines = [l[margin:] for l in lines]
+        return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------
+# Sketch 1: flow field. Particles follow the noise, leaving a trail of dots.
+# ----------------------------------------------------------------------------
+def draw_field(canvas, rng):
+    noise = Perlin(rng).noise
+    zoom = rng.uniform(0.008, 0.025)       # smaller = longer, smoother sweeps
+    turns = rng.uniform(1.5, 4.0)           # how much the direction can wind
+    stroke_len = rng.randint(40, 110)
+    target = rng.uniform(0.18, 0.30)        # fraction of dots lit when finished
+    ox, oy = rng.uniform(0, 1000), rng.uniform(0, 1000)
+
+    budget = int(canvas.w * canvas.h * 4)   # safety cap on total steps
+    while canvas.fill_ratio() < target and budget > 0:
+        x, y = rng.uniform(0, canvas.w), rng.uniform(0, canvas.h)
+        for _ in range(stroke_len):
+            angle = noise(x * zoom + ox, y * zoom + oy) * math.tau * turns
+            x += math.cos(angle)
+            y += math.sin(angle)
+            budget -= 1
+            if not canvas.inside(x, y):
+                break
+            canvas.plot(x, y)
+    return {"zoom": round(zoom, 4), "turns": round(turns, 2), "stroke": stroke_len}
+
+
+# ----------------------------------------------------------------------------
+# Sketch 2: fractal tree. One rule, applied to itself until the twigs are tiny.
+# ----------------------------------------------------------------------------
+def draw_tree(canvas, rng):
+    depth = rng.randint(9, 11)
+    spread = rng.uniform(0.3, 0.75)         # angle between the two children
+    ratio = rng.uniform(0.66, 0.76)         # how much each branch shrinks
+    wind = rng.uniform(-0.5, 0.5)           # lean, stronger on thin branches
+    wobble = rng.uniform(0.0, 0.12)         # per-branch randomness
+
+    # Scale the trunk so the whole tree fits the canvas height.
+    total = sum(ratio ** i for i in range(depth + 1))
+    trunk = canvas.h * 0.92 / total * 1.15
+
+    def branch(x, y, angle, length, d):
+        thickness = max(1.0, d * 0.45)
+        nx = x + math.cos(angle) * length
+        ny = y + math.sin(angle) * length
+        canvas.line(x, y, nx, ny, thickness)
+        if d == 0:
+            return
+        bend = wind * (depth + 1 - d) * 0.1
+        for side in (1, -1):
+            jitter = rng.uniform(-wobble, wobble)
+            branch(nx, ny, angle + side * spread + bend + jitter, length * ratio, d - 1)
+
+    # Angles: -pi/2 points straight up because y grows downward.
+    branch(canvas.w / 2, canvas.h - 1, -math.pi / 2, trunk, depth)
+    return {"depth": depth, "spread": round(spread, 2), "ratio": round(ratio, 3), "wind": round(wind, 2)}
+
+
+SKETCHES = {"field": draw_field, "tree": draw_tree}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("sketch", nargs="?", default="random", choices=["field", "tree", "random"])
+    ap.add_argument("--width", type=int, default=120, help="columns of art (default 120)")
+    ap.add_argument("--height", type=int, default=36, help="rows of art (default 36)")
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--preview", action="store_true", help="print instead of writing the file")
+    ap.add_argument("--show", action="store_true", help="launch the screensaver afterwards")
+    args = ap.parse_args()
+
+    seed = args.seed if args.seed is not None else random.randrange(1 << 31)
+    rng = random.Random(seed)
+    name = rng.choice(list(SKETCHES)) if args.sketch == "random" else args.sketch
+
+    canvas = DotCanvas(max(10, args.width), max(4, args.height))
+    params = SKETCHES[name](canvas, rng)
+    art = canvas.render()
+
+    if args.preview:
+        sys.stdout.write(art)
+        print(f"# {name}  seed={seed}  {params}", file=sys.stderr)
+        return
+
+    out = os.path.expanduser(args.out)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(art)
+    os.replace(tmp, out)
+    print(f"{name} (seed {seed}) {params} -> {out}")
+
+    if args.show and shutil.which("omarchy-launch-screensaver"):
+        subprocess.run(["omarchy-launch-screensaver", "force"], check=False)
+
+
+if __name__ == "__main__":
+    main()
